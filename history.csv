@@ -1,0 +1,2 @@
+job_id,task_id,timestamp,client_name,file_name,secure_filename,pages,copies,color,duplex,price,status,paper_size,page_mode,start_page,end_page
+job-1752276447365-d1lbg2l,task-1752276447367-w96qm5e,2025-07-12 01:27:30,Admin,1752273085_66c3130b_Facture_NAT887_-_Konte_Aissata_1.pdf,1752276450_f61fe75d_1752273085_66c3130b_Facture_NAT887_-_Konte_Aissata_1.pdf,1,,,,0.20,ERREUR_IMPRESSION,,,,

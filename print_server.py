@@ -51,6 +51,8 @@ STATUS = {
 }
 history_lock = threading.Lock()
 
+# --- Création des dossiers au démarrage ---
+# Ces lignes garantissent que les dossiers nécessaires existent.
 for folder in [UPLOAD_FOLDER, CONVERTED_FOLDER]:
     if not os.path.exists(folder):
         os.makedirs(folder)
@@ -417,7 +419,6 @@ def download_file(task_id):
 
     return "Fichier introuvable.", 404
 
-# --- FONCTION DE RÉIMPRESSION RESTAURÉE ---
 @app.route('/reprint', methods=['POST'])
 def reprint_task():
     if not session.get('is_admin'): return jsonify({'success': False, 'error': 'Non autorisé'}), 403
