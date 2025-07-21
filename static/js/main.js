@@ -1,4 +1,3 @@
-// static/js/main.js
 document.addEventListener('DOMContentLoaded', function() {
     const fileInput = document.getElementById('file-input');
     const addFileButton = document.getElementById('add-file-button');
@@ -6,12 +5,34 @@ document.addEventListener('DOMContentLoaded', function() {
     const clientNameInput = document.getElementById('client_name');
     const summaryButton = document.getElementById('summary-button');
     const modalPrintForm = document.getElementById('modal-print-form');
-    const confirmModalEl = document.getElementById('confirmModal');
     const fileOptionsArea = document.getElementById('file-options-area');
+    const toastContainer = document.getElementById('toast-container');
+
+    const PRIX_NB = parseFloat(document.getElementById('prix-nb-display').textContent.replace(',', '.'));
+    const PRIX_C = parseFloat(document.getElementById('prix-c-display').textContent.replace(',', '.'));
+
+    // NOUVEAU : On définit les extensions autorisées ici aussi
+    const ALLOWED_EXTENSIONS = ['pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'txt'];
 
     let fileStore = [];
     let currentJobId = null;
     let pollingInterval = null;
+
+    function showToast(message, type = 'danger') {
+        const toastId = `toast-${Date.now()}`;
+        const toastHTML = `
+            <div id="${toastId}" class="toast align-items-center text-bg-${type} border-0" role="alert" aria-live="assertive" aria-atomic="true">
+              <div class="d-flex">
+                <div class="toast-body">${message}</div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+              </div>
+            </div>`;
+        toastContainer.innerHTML += toastHTML;
+        const toastEl = document.getElementById(toastId);
+        const toast = new bootstrap.Toast(toastEl);
+        toast.show();
+        toastEl.addEventListener('hidden.bs.toast', () => toastEl.remove());
+    }
 
     function formatBytes(bytes, d = 2) {
         if (!bytes || bytes === 0) return '0 B';
@@ -21,11 +42,41 @@ document.addEventListener('DOMContentLoaded', function() {
         return `${parseFloat((bytes / Math.pow(k, i)).toFixed(d))} ${s[i]}`;
     }
 
+    function calculateTaskPrice(taskId) {
+        const fileEntry = fileStore.find(f => f.id === taskId);
+        const taskRow = fileListContainer.querySelector(`li[data-task-id="${taskId}"]`);
+        if (!fileEntry || !taskRow) return;
+
+        const pricePlaceholder = taskRow.querySelector('.task-price-placeholder');
+        const pages = fileEntry.serverData ? (fileEntry.serverData.pages || 0) : 0;
+
+        if (pages === 0) {
+            pricePlaceholder.textContent = 'Prix à définir';
+            return;
+        }
+
+        const copies = parseInt(taskRow.querySelector('input[name="copies"]').value) || 1;
+        const isColor = taskRow.querySelector('input[name="color"]').value === 'color';
+        const pageMode = taskRow.querySelector('input[name="pagemode"]').value;
+        const startPage = parseInt(taskRow.querySelector('input[name="startpage"]').value);
+        const endPage = parseInt(taskRow.querySelector('input[name="endpage"]').value);
+
+        let pagesToPrint = pages;
+        if (pageMode === 'range' && startPage > 0 && endPage >= startPage) {
+            pagesToPrint = (endPage - startPage) + 1;
+        }
+
+        const pricePerPage = isColor ? PRIX_C : PRIX_NB;
+        const totalPrice = pagesToPrint * copies * pricePerPage;
+
+        pricePlaceholder.textContent = `${totalPrice.toFixed(2)} €`;
+    }
+
     addFileButton.addEventListener('click', () => fileInput.click());
 
     fileInput.addEventListener('change', () => {
         if (!clientNameInput.value.trim()) {
-            alert("Veuillez d'abord renseigner votre nom.");
+            showToast("Veuillez d'abord renseigner votre nom.", "warning");
             fileInput.value = '';
             return;
         }
@@ -36,26 +87,30 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         const newFiles = Array.from(fileInput.files);
-        fileInput.value = '';
+        fileInput.value = ''; // On vide l'input immédiatement
 
         newFiles.forEach(file => {
-            if (fileStore.some(f => f.file.name === file.name && f.file.size === file.size)) return;
+            // --- MODIFICATION : Contrôle de l'extension ---
+            const extension = file.name.split('.').pop().toLowerCase();
+            if (!ALLOWED_EXTENSIONS.includes(extension)) {
+                showToast(`Le type de fichier "${file.name}" (.${extension}) n'est pas supporté.`, 'danger');
+                return; // On passe au fichier suivant sans rien faire
+            }
+            // ---------------------------------------------
 
+            if (fileStore.some(f => f.file.name === file.name && f.file.size === file.size)) return;
+            if (file.size === 0) {
+                showToast(`Le fichier "${file.name}" est vide et ne peut pas être envoyé.`, 'danger');
+                return;
+            }
             const taskId = `task-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-            const fileEntry = {
-                id: taskId,
-                file: file,
-                status: 'queued',
-                serverStatus: null,
-                serverData: null,
-                error: null
-            };
+            const fileEntry = { id: taskId, file: file, status: 'queued', serverStatus: null, serverData: null };
             fileStore.push(fileEntry);
             addFileToListDOM(fileEntry, fileStore.length - 1);
         });
 
         startProcessingQueue();
-        if (!pollingInterval) startPolling();
+        if (!pollingInterval && fileStore.length > 0) startPolling();
     });
 
     function addFileToListDOM(fileEntry, index) {
@@ -64,25 +119,16 @@ document.addEventListener('DOMContentLoaded', function() {
         const file = fileEntry.file;
         const fileRow = template.content.cloneNode(true).querySelector('li');
         fileRow.dataset.taskId = fileEntry.id;
-
         fileRow.querySelector('.file-name-placeholder').textContent = file.name;
-        fileRow.querySelector('.file-details-placeholder').innerHTML = `<i class="bi bi-file-earmark-binary"></i> ${file.type || 'Fichier'} <span class="mx-2">|</span> <i class="bi bi-hdd"></i> ${formatBytes(file.size)}`;
+        fileRow.querySelector('.file-details-placeholder').innerHTML = `<i class="bi bi-file-earmark-binary"></i> ${file.type || 'Fichier'} | <i class="bi bi-hdd"></i> ${formatBytes(file.size)}`;
 
-        fileRow.querySelector('.file-options-placeholder').innerHTML = `
-            <form>
-                <div class="d-flex flex-column flex-sm-row justify-content-around align-items-center gap-3">
-                    <div class="d-flex align-items-center gap-2"><label class="form-label mb-0 small">Copies:</label><input type="number" name="copies" class="form-control form-control-sm" value="1" min="1" style="width: 70px;"></div>
-                    <div class="w-100"><input type="hidden" name="color" value="bw"><div class="option-btn-group" data-group-name="color"><button type="button" class="btn option-btn active" data-value="bw">N&B</button><button type="button" class="btn option-btn" data-value="color">Couleur</button></div></div>
-                </div>
-                <div class="mt-2 text-center"><a class="small text-decoration-none" data-bs-toggle="collapse" href="#advanced-options-${index}"><i class="bi bi-gear"></i> Options avancées</a></div>
-                <div class="collapse mt-2" id="advanced-options-${index}">
-                    <div class="p-2 bg-light rounded">
-                        <div class="mb-3"><label class="form-label small">Format</label><select name="papersize" class="form-select form-select-sm"><option value="2" selected>A4</option><option value="1">A3</option><option value="3">A5</option></select></div>
-                        <div class="mb-3"><label class="form-label small">Impression</label><input type="hidden" name="siding" value="recto"><div class="option-btn-group" data-group-name="siding"><button type="button" class="btn option-btn active" data-value="recto">Recto</button><button type="button" class="btn option-btn" data-value="recto_verso">R/V</button></div></div>
-                        <div><label class="form-label small">Plage</label><input type="hidden" name="pagemode" value="all"><div class="option-btn-group" data-group-name="pagemode"><button type="button" class="btn option-btn active" data-value="all">Tout</button><button type="button" class="btn option-btn" data-value="range">Plage</button></div><div class="d-flex align-items-center gap-2 mt-2 page-range-inputs d-none"><input type="number" name="startpage" class="form-control form-control-sm" placeholder="Début" min="1"><span class="text-muted">-</span><input type="number" name="endpage" class="form-control form-control-sm" placeholder="Fin" min="1"></div></div>
-                    </div>
-                </div>
-            </form>`;
+        const collapseLink = fileRow.querySelector('[data-bs-toggle="collapse"]');
+        const collapseTarget = fileRow.querySelector('.collapse');
+        if (collapseLink && collapseTarget) {
+            const collapseId = `advanced-options-${index}`;
+            collapseLink.href = `#${collapseId}`;
+            collapseTarget.id = collapseId;
+        }
 
         fileListContainer.appendChild(fileRow);
     }
@@ -92,28 +138,15 @@ document.addEventListener('DOMContentLoaded', function() {
         filesToUpload.forEach(fileEntry => {
             fileEntry.status = 'uploading';
             updateFileStatusUI(fileEntry.id, 'uploading');
-
-            const fileRow = fileListContainer.querySelector(`li[data-task-id="${fileEntry.id}"]`);
-            const formData = new FormData(fileRow.querySelector('form'));
+            const formData = new FormData();
             formData.append('file', fileEntry.file);
             formData.append('client_name', clientNameInput.value);
             formData.append('job_id', currentJobId);
             formData.append('task_id', fileEntry.id);
-
             fetch('/upload_and_process_file', { method: 'POST', body: formData })
                 .then(res => res.json())
-                .then(data => {
-                    if (!data.success) {
-                        fileEntry.status = 'error';
-                        fileEntry.error = data.error || 'Erreur serveur';
-                        updateFileStatusUI(fileEntry.id, 'error', fileEntry.error);
-                    }
-                })
-                .catch(err => {
-                    fileEntry.status = 'error';
-                    fileEntry.error = 'Erreur de connexion.';
-                    updateFileStatusUI(fileEntry.id, 'error', fileEntry.error);
-                });
+                .then(data => { if (!data.success) { fileEntry.status = 'error'; updateFileStatusUI(fileEntry.id, 'error', data.error || 'Erreur serveur'); }})
+                .catch(err => { fileEntry.status = 'error'; updateFileStatusUI(fileEntry.id, 'error', 'Erreur de connexion.'); });
         });
     }
 
@@ -126,53 +159,40 @@ document.addEventListener('DOMContentLoaded', function() {
                 updateSummaryButton();
                 return;
             }
-
             fetch(`/get_job_status/${currentJobId}`)
                 .then(res => res.json())
                 .then(data => {
                     if (!data || !data.tasks) return;
-
                     data.tasks.forEach(taskData => {
                         const fileEntry = fileStore.find(f => f.id === taskData.task_id);
-                        if (fileEntry && fileEntry.serverStatus !== taskData.status) {
+                        if (fileEntry) {
                             fileEntry.serverStatus = taskData.status;
                             fileEntry.serverData = taskData;
                             updateFileStatusUI(fileEntry.id, taskData.status, taskData);
                         }
                     });
-
                     updateSummaryButton();
-
-                    if (data.is_complete) {
-                        clearInterval(pollingInterval);
-                        pollingInterval = null;
-                    }
+                    if (data.is_complete) { clearInterval(pollingInterval); pollingInterval = null; }
                 })
-                .catch(err => {
-                    console.error("Erreur de polling:", err);
-                    clearInterval(pollingInterval);
-                    pollingInterval = null;
-                });
+                .catch(err => { console.error("Erreur de polling:", err); clearInterval(pollingInterval); pollingInterval = null; });
         }, 2500);
     }
 
     function updateSummaryButton() {
         if (fileStore.length === 0) {
             summaryButton.disabled = true;
-            summaryButton.textContent = 'Suivant'; // Texte par défaut
+            summaryButton.textContent = 'Suivant';
             return;
         }
-
-        const finalStates = ['PRET_POUR_CALCUL', 'ERREUR_CONVERSION', 'ERREUR_PAGE_COUNT'];
+        const finalStates = ['PRET_POUR_CALCUL', 'PRET_SANS_COMPTAGE', 'ERREUR_CONVERSION', 'ERREUR_PAGE_COUNT', 'ERREUR_FICHIER_VIDE', 'ERREUR_LECTURE_FATALE'];
         const isProcessing = fileStore.some(f => !f.serverStatus || !finalStates.includes(f.serverStatus));
-        const hasReadyFiles = fileStore.some(f => f.serverStatus === 'PRET_POUR_CALCUL');
-
+        const hasReadyFiles = fileStore.some(f => f.serverStatus === 'PRET_POUR_CALCUL' || f.serverStatus === 'PRET_SANS_COMPTAGE');
         if (isProcessing) {
             summaryButton.disabled = true;
-            summaryButton.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Traitement en cours...`;
+            summaryButton.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Traitement...`;
         } else if (hasReadyFiles) {
             summaryButton.disabled = false;
-            summaryButton.textContent = 'Suivant'; // CORRECTION: Texte changé
+            summaryButton.textContent = 'Suivant';
         } else {
             summaryButton.disabled = true;
             summaryButton.textContent = 'Aucun fichier valide';
@@ -182,29 +202,37 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateFileStatusUI(taskId, status, data) {
         const fileRow = document.querySelector(`li[data-task-id="${taskId}"]`);
         if (!fileRow) return;
+        const optionsContainer = fileRow.querySelector('.options-container');
+        const isReady = status === 'PRET_POUR_CALCUL' || status === 'PRET_SANS_COMPTAGE';
+
+        optionsContainer.classList.toggle('d-none', !isReady);
+
+        calculateTaskPrice(taskId);
 
         const removeBtn = fileRow.querySelector('.remove-file-btn');
         const processingStates = ['uploading', 'EN_ATTENTE_TRAITEMENT', 'CONVERSION_EN_COURS', 'COMPTAGE_PAGES'];
         removeBtn.disabled = processingStates.includes(status);
-
         const statusDiv = fileRow.querySelector('.file-status');
         let statusHTML = '';
-        switch(status) {
-            case 'uploading': statusHTML = `<span class="text-primary"><span class="spinner-border spinner-border-sm me-2"></span>Envoi...</span>`; break;
-            case 'EN_ATTENTE_TRAITEMENT':
-            case 'CONVERSION_EN_COURS':
-            case 'COMPTAGE_PAGES': statusHTML = `<span class="text-primary"><span class="spinner-border spinner-border-sm me-2"></span>Traitement...</span>`; break;
-            case 'error':
-            case 'ERREUR_CONVERSION':
-            case 'ERREUR_PAGE_COUNT':
-                const errorMsg = typeof data === 'string' ? data : status.replace(/_/g, ' ');
-                statusHTML = `<span class="text-danger">❌ ${errorMsg}</span>`; break;
-            case 'PRET_POUR_CALCUL':
-                statusHTML = `<span class="text-success">✅ Prêt</span>`; break;
+        switch (status) {
+            case 'uploading': case 'EN_ATTENTE_TRAITEMENT': case 'CONVERSION_EN_COURS': case 'COMPTAGE_PAGES':
+                statusHTML = `<span class="text-primary"><span class="spinner-border spinner-border-sm me-2"></span>Traitement...</span>`; break;
+            case 'ERREUR_CONVERSION': statusHTML = `<span class="text-danger fw-bold">❌ Fichier non supporté</span>`; break;
+            case 'ERREUR_FICHIER_VIDE': statusHTML = `<span class="text-danger fw-bold">❌ Fichier vide</span>`; break;
+            case 'ERREUR_LECTURE_FATALE': statusHTML = `<span class="text-danger fw-bold">❌ Fichier corrompu</span>`; break;
+            case 'PRET_POUR_CALCUL': statusHTML = `<span class="text-success fw-bold">✅ Prêt</span>`; break;
+            case 'PRET_SANS_COMPTAGE': statusHTML = `<span class="text-warning fw-bold">⚠️ Prêt (comptage manuel)</span>`; break;
             default: statusHTML = `<span class="text-muted">En attente...</span>`;
         }
         statusDiv.innerHTML = statusHTML;
     }
+
+    fileListContainer.addEventListener('change', (e) => {
+        if (e.target.matches('input[name="copies"], input[name="startpage"], input[name="endpage"], select[name="papersize"]')) {
+            const taskId = e.target.closest('li').dataset.taskId;
+            calculateTaskPrice(taskId);
+        }
+    });
 
     fileListContainer.addEventListener('click', (e) => {
         const removeBtn = e.target.closest('.remove-file-btn');
@@ -214,8 +242,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 const taskId = liToRemove.dataset.taskId;
                 fileStore = fileStore.filter(f => f.id !== taskId);
                 liToRemove.remove();
-
-                updateSummaryButton();
                 if (fileStore.length === 0) {
                     clientNameInput.disabled = false;
                     currentJobId = null;
@@ -227,69 +253,70 @@ document.addEventListener('DOMContentLoaded', function() {
 
         const optionBtn = e.target.closest('.option-btn');
         if (optionBtn) {
-            const form = optionBtn.closest('form');
+            const li = optionBtn.closest('li');
+            const taskId = li.dataset.taskId;
             const group = optionBtn.closest('.option-btn-group');
             const groupName = group.dataset.groupName;
             const value = optionBtn.dataset.value;
-            form.querySelector(`input[name="${groupName}"]`).value = value;
+            li.querySelector(`input[name="${groupName}"]`).value = value;
             group.querySelectorAll('.option-btn').forEach(btn => btn.classList.remove('active'));
             optionBtn.classList.add('active');
             if (groupName === 'pagemode') {
-                const rangeInputs = group.nextElementSibling;
-                if (value === 'range') rangeInputs.classList.remove('d-none');
-                else rangeInputs.classList.add('d-none');
+                li.querySelector('.page-range-inputs').classList.toggle('d-none', value !== 'range');
             }
+            calculateTaskPrice(taskId);
         }
     });
 
     summaryButton.addEventListener('click', function() {
         const tasksPayload = fileStore
-            .filter(f => f.serverStatus === 'PRET_POUR_CALCUL')
+            .filter(f => f.serverStatus === 'PRET_POUR_CALCUL' || f.serverStatus === 'PRET_SANS_COMPTAGE')
             .map(f => {
-                const formElement = fileListContainer.querySelector(`li[data-task-id="${f.id}"] form`);
-                const formData = new FormData(formElement);
-                const options = Object.fromEntries(formData.entries());
+                const taskRow = fileListContainer.querySelector(`li[data-task-id="${f.id}"]`);
+                const options = {};
+                taskRow.querySelectorAll('[name]').forEach(input => { options[input.name] = input.value; });
                 return { task_id: f.id, options: options };
             });
-
-        if (tasksPayload.length === 0) {
-            alert("Aucun fichier n'est prêt à être imprimé.");
-            return;
-        }
-
-        fetch('/calculate_summary', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ job_id: currentJobId, tasks: tasksPayload })
-        })
-        .then(res => res.json())
-        .then(data => {
-            if (data.success && data.print_job_summary) {
-                const hasFailedFiles = fileStore.some(f => f.serverStatus?.includes('ERREUR'));
-                showConfirmationModal(data.print_job_summary, hasFailedFiles);
-            } else {
-                alert(data.error || "Impossible de calculer le résumé.");
-            }
-        });
+        if (tasksPayload.length === 0) { showToast("Aucun fichier n'est prêt à être imprimé.", "warning"); return; }
+        fetch('/calculate_summary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job_id: currentJobId, tasks: tasksPayload }) })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success && data.print_job_summary) {
+                    const hasFailedFiles = fileStore.some(f => f.serverStatus?.includes('ERREUR'));
+                    showConfirmationModal(data.print_job_summary, hasFailedFiles);
+                } else { showToast(data.error || "Impossible de calculer le résumé."); }
+            });
     });
 
     function showConfirmationModal(data, hasFailedFiles) {
         document.getElementById('modal-client-name').textContent = data.client_name;
-        document.getElementById('modal-total-price').textContent = `${data.prix_total.toFixed(2)} €`;
         const taskList = document.getElementById('modal-task-list');
         taskList.innerHTML = '';
 
         if (hasFailedFiles) {
-            const warningHTML = `<div class="alert alert-warning small"><i class="bi bi-exclamation-triangle-fill"></i> <strong>Attention :</strong> Certains fichiers n'ont pas pu être traités et n'apparaissent pas ci-dessous. Ils ne seront pas imprimés.</div>`;
-            taskList.innerHTML += warningHTML;
+            taskList.innerHTML += `<div class="alert alert-warning small"><i class="bi bi-exclamation-triangle-fill"></i> <strong>Attention :</strong> Certains fichiers n'ont pas pu être traités.</div>`;
         }
 
+        let manualPriceTasksExist = false;
         data.tasks.forEach(task => {
-            const colorIcon = task.is_color ? '<i class="bi bi-palette-fill" style="color: #0d6efd;"></i> Couleur' : '<i class="bi bi-palette text-secondary"></i> N&B';
-            const duplexIcon = task.is_duplex ? '<i class="bi bi-layers-fill text-secondary"></i> Recto/Verso' : '<i class="bi bi-file-earmark-text text-secondary"></i> Recto';
-            const taskHTML = `<div class="task-card"><div class="d-flex justify-content-between align-items-start"><h6 class="fw-bold file-name me-3">${task.name}</h6><span class="badge bg-primary rounded-pill fs-6">${task.prix.toFixed(2)} €</span></div><hr class="my-2"><div class="task-details text-muted"><div class="detail-item"><i class="bi bi-file-earmark-ruled text-secondary"></i> ${task.pages} page(s)</div><div class="detail-item"><i class="bi bi-files text-secondary"></i> ${task.copies} copie(s)</div><div class="detail-item">${colorIcon}</div><div class="detail-item">${duplexIcon}</div></div></div>`;
+            const colorIcon = task.is_color ? '<i class="bi bi-palette-fill text-primary"></i> Couleur' : '<i class="bi bi-palette text-secondary"></i> N&B';
+            const duplexIcon = task.is_duplex ? '<i class="bi bi-layers-fill text-secondary"></i> R/V' : '<i class="bi bi-file-earmark-text text-secondary"></i> Recto';
+            const pageInfo = task.pages > 0 ? `${task.pages} page(s)` : `<span class="text-warning">N/A</span>`;
+            let priceBadge = `<span class="badge bg-primary rounded-pill fs-6">${task.prix.toFixed(2)} €</span>`;
+            if (task.pages === 0) {
+                priceBadge = `<span class="badge bg-warning text-dark rounded-pill fs-6">Prix à définir</span>`;
+                manualPriceTasksExist = true;
+            }
+            const taskHTML = `<div class="task-card"><div class="d-flex justify-content-between align-items-start"><h6 class="fw-bold file-name me-3">${task.name}</h6>${priceBadge}</div><hr class="my-2"><div class="task-details text-muted"><div class="detail-item"><i class="bi bi-file-earmark-ruled text-secondary"></i> ${pageInfo}</div><div class="detail-item"><i class="bi bi-files text-secondary"></i> ${task.copies} copie(s)</div><div class="detail-item">${colorIcon}</div><div class="detail-item">${duplexIcon}</div></div></div>`;
             taskList.innerHTML += taskHTML;
         });
+
+        let totalPriceDisplay = `${data.prix_total.toFixed(2)} €`;
+        if (manualPriceTasksExist) {
+            totalPriceDisplay += ` <span class="fs-6 text-warning">(+ tâches manuelles)</span>`;
+        }
+        document.getElementById('modal-total-price').innerHTML = totalPriceDisplay;
+
         new bootstrap.Modal(document.getElementById('confirmModal')).show();
     }
 
@@ -298,21 +325,24 @@ document.addEventListener('DOMContentLoaded', function() {
         const confirmModal = bootstrap.Modal.getInstance(document.getElementById('confirmModal'));
         if (confirmModal) confirmModal.hide();
         document.getElementById('loading-overlay').style.display = 'flex';
-
         fetch('/print', { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            if (data.success) {
-                setTimeout(() => { window.location.href = '/?success_message=Impression+lancée+avec+succès+!'; }, 3000);
-            } else {
+            .then(res => res.json())
+            .then(data => {
                 document.getElementById('loading-overlay').style.display = 'none';
-                alert(data.error || "Une erreur s'est produite lors du lancement de l'impression.");
-            }
-        })
-        .catch(err => {
-            console.error(err);
-            document.getElementById('loading-overlay').style.display = 'none';
-            alert("Erreur de communication avec le serveur.");
-        });
+                if (data.success) { window.location.href = '/?success_message=Impression+lancée+avec+succès+!'; }
+                else { showToast(data.error || "Une erreur s'est produite."); }
+            })
+            .catch(err => {
+                console.error(err);
+                document.getElementById('loading-overlay').style.display = 'none';
+                showToast("Erreur de communication avec le serveur.");
+            });
     });
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const successMessage = urlParams.get('success_message');
+    if (successMessage) {
+        showToast(successMessage, 'success');
+        window.history.replaceState({}, document.title, "/");
+    }
 });
